@@ -35,15 +35,7 @@ def new_name() -> str:
 class ConsumerManager:
     def __init__(self, config: Config, deserializer: SchemaRegistrySerializer) -> None:
         self.config = config
-        if self.config["advertised_port"] is None:
-            self.hostname = (
-                f"{self.config['advertised_protocol']}://{self.config['advertised_hostname']}:{self.config['port']}"
-            )
-        else:
-            self.hostname = (
-                f"{self.config['advertised_protocol']}://"
-                f"{self.config['advertised_hostname']}:{self.config['advertised_port']}"
-            )
+        self.base_uri = self.config["rest_base_uri"]
         self.deserializer = deserializer
         self.consumers = {}
         self.consumer_locks = defaultdict(Lock)
@@ -192,8 +184,8 @@ class ConsumerManager:
             self.consumers[internal_name] = TypedConsumer(
                 consumer=c, serialization_format=request_data["format"], config=request_data
             )
-            base_uri = urljoin(self.hostname, f"consumers/{group_name}/instances/{consumer_name}")
-            KarapaceBase.r(content_type=content_type, body={"base_uri": base_uri, "instance_id": consumer_name})
+            consumer_base_uri = urljoin(self.base_uri, f"consumers/{group_name}/instances/{consumer_name}")
+            KarapaceBase.r(content_type=content_type, body={"base_uri": consumer_base_uri, "instance_id": consumer_name})
 
     async def create_kafka_consumer(self, fetch_min_bytes, group_name, internal_name, request_data):
         ssl_context = create_client_ssl_context(self.config)
@@ -214,8 +206,11 @@ class ConsumerManager:
                     sasl_plain_username=self.config["sasl_plain_username"],
                     sasl_plain_password=self.config["sasl_plain_password"],
                     group_id=group_name,
-                    fetch_min_bytes=fetch_min_bytes,
+                    fetch_min_bytes=max(1, fetch_min_bytes),  # Discard earlier negative values
                     fetch_max_bytes=self.config["consumer_request_max_bytes"],
+                    fetch_max_wait_ms=self.config.get("consumer_fetch_max_wait_ms", 500),  # Copy aiokafka default 500 ms
+                    # This will cause delay if subscription is changed.
+                    consumer_timeout_ms=self.config.get("consumer_timeout_ms", 200),  # Copy aiokafka default 200 ms
                     request_timeout_ms=request_timeout_ms,
                     enable_auto_commit=request_data["auto.commit.enable"],
                     auto_offset_reset=request_data["auto.offset.reset"],

@@ -24,7 +24,7 @@ from karapace.errors import (
 )
 from karapace.karapace import KarapaceBase
 from karapace.rapu import HTTPRequest, JSON_CONTENT_TYPE, SERVER_NAME
-from karapace.schema_models import SchemaType, TypedSchema, ValidatedTypedSchema
+from karapace.schema_models import ParsedTypedSchema, SchemaType, TypedSchema, ValidatedTypedSchema
 from karapace.schema_references import Reference
 from karapace.schema_registry import KarapaceSchemaRegistry, validate_version
 from karapace.typing import JsonData
@@ -81,7 +81,7 @@ def references_list(references: Optional[Dict]) -> Optional[List[Reference]]:
 
 class KarapaceSchemaRegistryController(KarapaceBase):
     def __init__(self, config: Config) -> None:
-        super().__init__(config=config)
+        super().__init__(config=config, not_ready_handler=self._forward_if_not_ready_to_serve)
 
         self._auth: Optional[HTTPAuthorizer] = None
         if self.config["registry_authfile"] is not None:
@@ -107,6 +107,32 @@ class KarapaceSchemaRegistryController(KarapaceBase):
         if self._auth:
             if not self._auth.check_authorization(user, operation, resource):
                 self.r(body={"message": "Forbidden"}, content_type=JSON_CONTENT_TYPE, status=HTTPStatus.FORBIDDEN)
+
+    async def _forward_if_not_ready_to_serve(self, request: HTTPRequest) -> None:
+        if self.schema_registry.schema_reader.ready:
+            pass
+        else:
+            # Not ready, still loading the state.
+            # Needs only the master_url
+            _, master_url = await self.schema_registry.get_master(ignore_readiness=True)
+            if not master_url:
+                self.no_master_error(request.content_type)
+            elif f"{self.config['advertised_hostname']}:{self.config['advertised_port']}" in master_url:
+                # If master url is the same as the url of this Karapace respond 503.
+                self.r(
+                    body="",
+                    content_type=request.get_header("Content-Type"),
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            else:
+                url = f"{master_url}{request.url.path}"
+                await self._forward_request_remote(
+                    request=request,
+                    body=request.json,
+                    url=url,
+                    content_type=request.get_header("Content-Type"),
+                    method=request.method,
+                )
 
     def _add_schema_registry_routes(self) -> None:
         self.route(
@@ -975,7 +1001,9 @@ class KarapaceSchemaRegistryController(KarapaceBase):
 
         try:
             new_schema_dependencies = self.schema_registry.resolve_references(references)
-            new_schema = ValidatedTypedSchema.parse(
+            # When checking if schema is already registered, allow unvalidated schema in as
+            # there might be stored schemas that are non-compliant from the past.
+            new_schema = ParsedTypedSchema.parse(
                 schema_type=schema_type,
                 schema_str=schema_str,
                 references=references,
@@ -1028,24 +1056,39 @@ class KarapaceSchemaRegistryController(KarapaceBase):
 
         # Match schemas based on version from latest to oldest
         for schema in sorted(subject_data["schemas"].values(), key=lambda item: item["version"], reverse=True):
-            validated_typed_schema = ValidatedTypedSchema.parse(schema["schema"].schema_type, schema["schema"].schema_str)
+            try:
+                parsed_typed_schema = ParsedTypedSchema.parse(schema["schema"].schema_type, schema["schema"].schema_str)
+            except InvalidSchema as e:
+                failed_schema_id = schema["id"]
+                self.log.exception("Existing schema failed to parse. Id: %s", failed_schema_id)
+                self.stats.unexpected_exception(
+                    ex=e, where="Matching existing schemas to posted. Failed schema id: {failed_schema_id}"
+                )
+                self.r(
+                    body={
+                        "error_code": SchemaErrorCodes.HTTP_INTERNAL_SERVER_ERROR.value,
+                        "message": f"Error while looking up schema under subject {subject}",
+                    },
+                    content_type=content_type,
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+
             if schema_type is SchemaType.JSONSCHEMA:
-                schema_valid = validated_typed_schema.to_dict() == new_schema.to_dict()
+                schema_valid = parsed_typed_schema.to_dict() == new_schema.to_dict()
             else:
-                schema_valid = validated_typed_schema.schema == new_schema.schema
-            if validated_typed_schema.schema_type == new_schema.schema_type and schema_valid:
+                schema_valid = parsed_typed_schema.schema == new_schema.schema
+            if parsed_typed_schema.schema_type == new_schema.schema_type and schema_valid:
                 ret = {
                     "subject": subject,
                     "version": schema["version"],
                     "id": schema["id"],
-                    "schema": validated_typed_schema.schema_str,
+                    "schema": parsed_typed_schema.schema_str,
                 }
                 if schema_type is not SchemaType.AVRO:
                     ret["schemaType"] = schema_type
                 self.r(ret, content_type)
             else:
-                self.log.debug("Schema %r did not match %r", schema, validated_typed_schema)
-
+                self.log.debug("Schema %r did not match %r", schema, parsed_typed_schema)
         self.r(
             body={
                 "error_code": SchemaErrorCodes.SCHEMA_NOT_FOUND.value,
@@ -1116,7 +1159,7 @@ class KarapaceSchemaRegistryController(KarapaceBase):
                 self.r(
                     body={
                         "error_code": SchemaErrorCodes.INVALID_SCHEMA.value,
-                        "message": f"Invalid {schema_type} schema. Error: {str(ex)}",
+                        "message": f"Invalid {schema_type.value} schema. Error: {str(ex)}",
                     },
                     content_type=content_type,
                     status=HTTPStatus.UNPROCESSABLE_ENTITY,

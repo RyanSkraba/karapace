@@ -20,18 +20,20 @@ from karapace.errors import (
 )
 from karapace.key_format import KeyFormatter
 from karapace.master_coordinator import MasterCoordinator
-from karapace.schema_models import SchemaType, TypedSchema, ValidatedTypedSchema
+from karapace.schema_models import ParsedTypedSchema, SchemaType, TypedSchema, ValidatedTypedSchema
 from karapace.schema_reader import KafkaSchemaReader
 from karapace.schema_references import Reference
 from karapace.typing import ResolvedVersion, Subject, SubjectData, Version
 from karapace.utils import json_encode, KarapaceKafkaClient, reference_key
-from typing import Dict, List, Optional, Tuple, Union
+from karapace.version import __version__
+from typing import cast, Dict, List, Optional, Tuple, Union
 
 import asyncio
 import logging
 import time
 
 LOG = logging.getLogger(__name__)
+X_REGISTRY_VERSION_HEADER = ("X-Registry-Version", f"karapace-{__version__}".encode("utf8"))
 
 
 def _resolve_version(subject_data: SubjectData, version: Version) -> ResolvedVersion:
@@ -63,6 +65,9 @@ def validate_version(version: Version) -> Version:
 class KarapaceSchemaRegistry:
     def __init__(self, config: Config) -> None:
         self.config = config
+        host: str = cast(str, self.config["host"])
+        self.x_origin_host_header: Tuple[str, bytes] = ("X-Origin-Host", host.encode("utf8"))
+
         self.producer = self._create_producer()
         self.kafka_timeout = 10
 
@@ -82,7 +87,7 @@ class KarapaceSchemaRegistry:
     def subjects_list(self, include_deleted: bool = False) -> List[Subject]:
         return [
             key
-            for key, val in self.schema_reader.subjects.items()
+            for key in list(self.schema_reader.subjects.keys())
             if self.schema_reader.get_schemas(key, include_deleted=include_deleted)
         ]
 
@@ -125,13 +130,19 @@ class KarapaceSchemaRegistry:
                 LOG.exception("Unable to create producer, retrying")
                 time.sleep(1)
 
-    async def get_master(self) -> Tuple[bool, Optional[str]]:
+    async def get_master(self, ignore_readiness: bool = False) -> Tuple[bool, Optional[str]]:
+        """Resolve if current node is the primary and the primary node address.
+
+        :param bool ignore_readiness: Ignore waiting to become ready and return
+                                      follower/primary state and primary url.
+        :return (bool, Optional[str]): returns the primary/follower state and primary url
+        """
         async with self._master_lock:
             while True:
                 are_we_master, master_url = self.mc.get_master_info()
                 if are_we_master is None:
                     LOG.info("No master set: %r, url: %r", are_we_master, master_url)
-                elif self.schema_reader.ready is False:
+                elif not ignore_readiness and self.schema_reader.ready is False:
                     LOG.info("Schema reader isn't ready yet: %r", self.schema_reader.ready)
                 else:
                     return are_we_master, master_url
@@ -376,14 +387,14 @@ class KarapaceSchemaRegistry:
 
                     if old_schema_references:
                         old_schema_dependencies = self.resolve_references(old_schema_references)
-                    validated_old_schema = ValidatedTypedSchema.parse(
+                    parsed_old_schema = ParsedTypedSchema.parse(
                         schema_type=old_schema.schema_type,
                         schema_str=old_schema.schema_str,
                         references=old_schema_references,
                         dependencies=old_schema_dependencies,
                     )
                     result = check_compatibility(
-                        old_schema=validated_old_schema,
+                        old_schema=parsed_old_schema,
                         new_schema=new_schema,
                         compatibility_mode=compatibility_mode,
                     )
@@ -444,7 +455,12 @@ class KarapaceSchemaRegistry:
         if isinstance(value, str):
             value = value.encode("utf8")
 
-        future = self.producer.send(self.config["topic_name"], key=key, value=value)
+        future = self.producer.send(
+            self.config["topic_name"],
+            key=key,
+            value=value,
+            headers=[X_REGISTRY_VERSION_HEADER, self.x_origin_host_header],
+        )
         self.producer.flush(timeout=self.kafka_timeout)
         try:
             msg = future.get(self.kafka_timeout)
