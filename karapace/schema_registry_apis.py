@@ -1125,7 +1125,7 @@ class KarapaceSchemaRegistryController(KarapaceBase):
                 human_error = f"{e.__cause__.args[0]}"  # pylint: disable=no-member
             else:
                 from_body_schema_str = body["schema"]
-                human_error = f"Invalid schema {from_body_schema_str} with refs {references} of type {schema_type}"
+                human_error = f"Invalid schema {from_body_schema_str} with refs {references} of type {schema_type.value}"
             self.r(
                 body={
                     "error_code": SchemaErrorCodes.INVALID_SCHEMA.value,
