@@ -1,3 +1,7 @@
+"""
+Copyright (c) 2023 Aiven Ltd
+See LICENSE for details
+"""
 from karapace.schema_references import Reference
 from karapace.typing import JsonData, Subject, Version
 from typing import Any, Optional, TYPE_CHECKING

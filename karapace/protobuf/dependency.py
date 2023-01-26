@@ -1,3 +1,7 @@
+"""
+Copyright (c) 2023 Aiven Ltd
+See LICENSE for details
+"""
 from karapace.dependency import DependencyVerifierResult
 from karapace.protobuf.known_dependency import DependenciesHardcoded, KnownDependency
 from karapace.protobuf.one_of_element import OneOfElement
