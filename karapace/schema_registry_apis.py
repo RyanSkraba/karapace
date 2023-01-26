@@ -1010,15 +1010,13 @@ class KarapaceSchemaRegistryController(KarapaceBase):
                 dependencies=new_schema_dependencies,
             )
             for schema in subject_data["schemas"].values():
-                validated_typed_schema = ValidatedTypedSchema.parse(
-                    schema["schema"].schema_type, schema["schema"].schema_str
-                )
+                parsed_typed_schema = ParsedTypedSchema.parse(schema["schema"].schema_type, schema["schema"].schema_str)
                 if schema_type is SchemaType.JSONSCHEMA:
-                    schema_valid = validated_typed_schema.to_dict() == new_schema.to_dict()
+                    schema_valid = parsed_typed_schema.to_dict() == new_schema.to_dict()
                 else:
-                    schema_valid = validated_typed_schema.schema == new_schema.schema
+                    schema_valid = parsed_typed_schema.schema == new_schema.schema
                 if (
-                    validated_typed_schema.schema_type == new_schema.schema_type
+                    parsed_typed_schema.schema_type == new_schema.schema_type
                     and schema_valid
                     and references_list(schema.get("references", None)) == references
                 ):
@@ -1026,13 +1024,13 @@ class KarapaceSchemaRegistryController(KarapaceBase):
                         "subject": subject,
                         "version": schema["version"],
                         "id": schema["id"],
-                        "schema": validated_typed_schema.schema_str,
+                        "schema": parsed_typed_schema.schema_str,
                     }
                     if schema_type is not SchemaType.AVRO:
                         ret["schemaType"] = schema_type
                     self.r(ret, content_type)
                 else:
-                    self.log.debug("Schema %r did not match %r", schema, validated_typed_schema)
+                    self.log.debug("Schema %r did not match %r", schema, parsed_typed_schema)
         except InvalidSchema:
             self.log.exception("No proper parser found")
             self.r(

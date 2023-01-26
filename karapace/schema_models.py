@@ -110,7 +110,9 @@ class TypedSchema:
             return self._schema_cached
         if self.schema_type is SchemaType.AVRO:
             try:
-                self._schema_cached = parse_avro_schema_definition(self.schema_str)
+                self._schema_cached = parse_avro_schema_definition(
+                    self.schema_str, validate_enum_symbols=False, validate_names=False
+                )
             except (SchemaParseException, json.JSONDecodeError, TypeError) as e:
                 raise InvalidSchema from e
 
